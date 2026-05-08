@@ -49,9 +49,9 @@ po/*~
 rsconnect/
 
 # Files bigger than 50MB
-./GSM7021870_HCC.tar.gz
-./GSM7021871_PanIN.tar.gz
-./GSM7021872_PDAClymphnode.tar.gz
-./HCC/molecule_info.h5
-./PanIN/cloupe.cloupe
-./PanIN/molecule_info.h5
+/GSM7021870_HCC.tar.gz
+/GSM7021871_PanIN.tar.gz
+/GSM7021872_PDAClymphnode.tar.gz
+/HCC/molecule_info.h5
+/PanIN/cloupe.cloupe
+/PanIN/molecule_info.h5
