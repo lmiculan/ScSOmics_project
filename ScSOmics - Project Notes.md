@@ -16,9 +16,13 @@ The paper focuses on the transition of healthy cells into diseased states (e.g.,
 
 Since Visium spots (55 µm) are not truly single-cell (often containing 1–10 cells), this stage focuses on treating each spot as an observation to define the transcriptomic landscape.
 
+- **Ambient DNA **
+
 - **Normalization & Dimensionality Reduction:** Use `SCTransform` (Seurat) or `LogNormalize` (Scanpy). Run PCA followed by UMAP/t-SNE to visualize clusters.
     
-- **Clustering:** Use the Louvain or Leiden algorithm. Your current worktree suggests you are already testing various _k_-means and graph-based clusters.
+- **Clustering:** Use the Louvain or Leiden algorithm.
+
+- **Quality control**: since it's Visium, spots will have naturally higher counts, so we relax the threshold (but mithochonrdial DNA percentage remains the same)
     
 - **Deconvolution:** Since the spots are mixtures, use tools like **RCTD** (Robust Cell Type Decomposition), **Cell2location**, or **Tangram** to estimate the proportion of specific cell types (e.g., CAFs, epithelial cells, immune cells) within each spot using a scRNA-seq reference.
     
