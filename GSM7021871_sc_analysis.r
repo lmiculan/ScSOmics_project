@@ -89,14 +89,6 @@ VlnPlot(filtered_hcc_seurat, group.by = "scDblFinder.class",
 
 # Remove predicted doublets
 final_hcc_seurat <- subset(filtered_hcc_seurat, subset = scDblFinder.class == "singlet")
-# Final clustering and visualization
-final_hcc_seurat <- NormalizeData(final_hcc_seurat) %>%
-  FindVariableFeatures() %>%
-  ScaleData() %>%
-  RunPCA() %>%
-  FindNeighbors(dims = 1:20) %>%
-  FindClusters(resolution = 0.5) %>%
-  RunUMAP(dims = 1:20)
 
-DimPlot(final_hcc_seurat, reduction = "umap", label = TRUE) + ggtitle("UMAP of Final HCC Data After QC and Doublet Removal")
+# Deconvolution of spatial spots
 

@@ -55,3 +55,9 @@ rsconnect/
 /HCC/molecule_info.h5
 /PanIN/cloupe.cloupe
 /PanIN/molecule_info.h5
+
+# Hidden files with ._
+._*
+
+# OSX shart
+.DS_Store
