@@ -64,8 +64,3 @@ The current analysis involves three distinct tissue types with specific director
 ### 3. PDAC Lymph Node (PDAClymphnode)
 * **Status:** Metastatic Pancreatic Ductal Adenocarcinoma analysis.
 * **Goal:** Understand spatial distribution of metastatic cells in lymphatic tissue.
-
-
-
-# TODO
-- Deconvolution

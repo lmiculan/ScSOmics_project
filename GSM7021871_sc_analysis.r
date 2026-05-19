@@ -14,8 +14,6 @@ library(dplyr)
 # Quality control pipeline for Seurat objects
 qc_pipeline <- function(seurat_obj, dimensions, res) {
   seurat_obj <- SCTransform(seurat_obj) |>
-  FindVariableFeatures() |>
-  ScaleData() |>
   RunPCA() |>
   FindNeighbors(dims = 1:dimensions) |>
   FindClusters(resolution = res) |>
@@ -144,8 +142,7 @@ soupx_list <- map(soupx_list, ~ {
 
 # Plot SoupX results for each sample
 lapply(seq_along(soupx_list), function(i) {
-  p <- VlnPlot(soupx_list[[i]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) +
-    ggtitle(paste("Percentage of Mitochondrial DNA for", soupx_list[[i]]@project.name))
+  p <- VlnPlot(soupx_list[[i]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 2) + labs(x = NULL)
   print(p)
 })
 
@@ -164,8 +161,8 @@ merged_seurat <- JoinLayers(
   new.layer = "counts"
 )
 
-# Delete single dataset to retrive memory
-rm(list = c("hcc_seurat", "panin_seurat", "pdac_seurat", "raw_panin_seurat", "raw_hcc_counts", "raw_pdac_seurat"))
+# Delete unused objects to free memory
+rm(list = c("seu_list_qc","hcc_seurat", "panin_seurat", "pdac_seurat", "raw_panin_seurat", "raw_hcc_counts", "raw_pdac_seurat", "raw_panin_seurat", "raw_pdac_counts", "raw_hcc_seurat", "hcc_counts", "panin", "pdac", "raw_hcc_counts", "raw_panin", "raw_pdac", "filtered_list", "raw_list", "soupx_list_sub", "soupx_list", "seu_list", "raw_seu_list", "run_soupx_automated", "seu_list", "raw_seu_list", "filtered_data_dirs"))
 
 ##### Doublet Detection using scDblFinder #####
 merged_seurat <- dblfinder(merged_seurat)
@@ -180,62 +177,56 @@ ElbowPlot(final_seurat, ndims = 50) + ggtitle("Elbow Plot for PCA - Final Seurat
 # Dimplots for visualiztion
 DimPlot(final_seurat, reduction = "umap", group.by = "orig.ident",label = TRUE) + ggtitle("UMAP of Final Data After QC and Doublet Removal - Samples")
 
+##### Single sample QC pipeline and UMAP visualization #####
+seu_list <- SplitObject(final_seurat, split.by = "orig.ident")
+# Merge PanIn and PDAC samples for a combined pancreatic analysis
+seu_list[["Pancreatic_Axis"]] <- merge(seu_list[["PanIN_SingleCell"]], seu_list[["PDAC_SingleCell"]])
+seu_list <- seu_list[c("HCC_SingleCell", "Pancreatic_Axis")]
+
+# Rerun QC
+seu_qc <- map(seu_list, ~ qc_pipeline(.x, dimensions = 20, res = 0.5))
+# Dimplots for each sample
+lapply(seq_along(seu_qc), function(i) {
+  p <- DimPlot(seu_qc[[i]], reduction = "umap", label = TRUE) + ggtitle(paste("UMAP of", names(seu_qc)[i]))
+  print(p)
+})
+
 ##### Differentially expressed analysis #####
+# DE-analysis per sample
+lapply(seq_along(seu_qc), function(i) {
+  seu_qc[[i]] <- PrepSCTFindMarkers(seu_qc[[i]])
+  markers <- FindAllMarkers(seu_qc[[i]], assay = DefaultAssay(seu_qc[[i]]), slot = "data", test.use = "wilcox", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+  markers <- markers %>% arrange(cluster, desc(avg_log2FC))
+  write.csv(markers, file = file.path("results", paste0("markers_", names(seu_qc)[i], ".csv")), row.names = FALSE)
+})
 
-tissues <- c("HCC_SingleCell", "PanIN_SingleCell", "PDAC_SingleCell")
+# Heatmaps of top markers per sample
+lapply(seq_along(seu_qc), function(i) {
+  markers <- read.csv(file.path("results", paste0("markers_", names(seu_qc)[i], ".csv")))
+  top4 <- markers %>% group_by(cluster) %>% filter(p_val_adj < 0.05) %>% slice_max(order_by = avg_log2FC, n = 4) %>% ungroup()
+  top_genes <- unique(top4$gene)
+  heatmap_plot <- DoHeatmap(seu_qc[[i]], features = top_genes, assay = DefaultAssay(seu_qc[[i]]), slot = "scale.data") +
+    NoLegend() +
+    ggtitle(paste("Top 4 markers per cluster for", names(seu_qc)[i]))
+  print(heatmap_plot)
+  # Feature plots for top markers, per cluster
+  p <- FeaturePlot(seu_qc[[i]], features = top_genes, reduction = "umap") +
+    ggtitle(paste("Feature Plot of Cell Cycle Genes for", names(seu_qc)[i]))
+  print(p)
+})
 
-# QC once per tissue
-seu_qc <- tissues |>
-  setNames(tissues) |>
-  lapply(function(t) {
-    seu_t <- subset(final_seurat, subset = orig.ident == t)
-    qc_pipeline(seu_t, dimensions = 20, res = 0.5)
-  })
 
-run_de_on_qc <- function(seu_t, tissue) {
-  DefaultAssay(seu_t) <- "SCT"
-  if (is.null(Idents(seu_t))) Idents(seu_t) <- seu_t$seurat_clusters
 
-  markers <- FindAllMarkers(
-    seu_t,
-    assay = "SCT",
-    slot = "data",
-    test.use = "wilcox",
-    only.pos = TRUE,
-    min.pct = 0.25,
-    logfc.threshold = 0.25
-  )
-
-  top5 <- markers |>
-    slice_max(avg_log2FC, n = 5, with_ties = FALSE, by = clusters)
-
-  top_genes <- unique(top5$gene)
-
-  heatmap <- DoHeatmap(
-    seu_t,
-    features = intersect(top_genes, rownames(seu_t)),
-    assay = "SCT",
-    slot = "scale.data"
-  ) + NoLegend() + ggtitle(paste("Top 5 markers:", tissue))
-
-  feature_plot <- if ("Spatial" %in% names(seu_t@assays)) {
-    SpatialFeaturePlot(seu_t, features = top_genes, ncol = 3)
-  } else {
-    FeaturePlot(seu_t, features = top_genes, ncol = 3)
-  }
-
-  list(markers = markers, top5 = top5, heatmap = heatmap, feature_plot = feature_plot)
-}
-
-de_results <- Map(run_de_on_qc, seu_qc, names(seu_qc))
-de_results
- 
 ## Trajectory analysis with pseudotime ordering ##
+
 # 7. Order cells in pseudotime (root cells can be specified if known, otherwise Monocle3 will attempt to infer them)
 cds_pancreatic <- order_cells(cds_pancreatic)
+plot_cells(cds_pancreatic, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
+  ggtitle("Monocle3 Trajectory Analysis with Cluster Coloring")
 plot_cells(cds_pancreatic, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
   ggtitle("Monocle3 Trajectory Analysis with Pseudotime Coloring")
 
+####### HCC Trajectory Analysis #######
 # 1. Isolate only the HCC cells
 hcc_only <- subset(final_seurat, subset = orig.ident %in% "HCC_SingleCell")
 
@@ -271,7 +262,9 @@ cds_hcc@clusters$UMAP$partitions <- mock_partitions
 cds_hcc <- learn_graph(cds_hcc, use_partition = FALSE)
 cds_hcc <- order_cells(cds_hcc, reduction_method = "UMAP")
 plot_cells(cds_hcc, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
-  ggtitle("Monocle3 Trajectory Analysis of HCC Only")
+  ggtitle("Monocle3 Trajectory Analysis of HCC Only - Clusters")
+plot_cells(cds_hcc, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
+  ggtitle("Monocle3 Trajectory Analysis of HCC Only - Pseudotime")
 
 ##### Archive #####
 
