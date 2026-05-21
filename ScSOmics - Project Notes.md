@@ -16,8 +16,6 @@ The paper focuses on the transition of healthy cells into diseased states (e.g.,
 
 Since Visium spots (55 µm) are not truly single-cell (often containing 1–10 cells), this stage focuses on treating each spot as an observation to define the transcriptomic landscape.
 
-- **Ambient DNA **
-
 - **Normalization & Dimensionality Reduction:** Use `SCTransform` (Seurat) or `LogNormalize` (Scanpy). Run PCA followed by UMAP/t-SNE to visualize clusters.
     
 - **Clustering:** Use the Louvain or Leiden algorithm.
@@ -64,3 +62,5 @@ The current analysis involves three distinct tissue types with specific director
 ### 3. PDAC Lymph Node (PDAClymphnode)
 * **Status:** Metastatic Pancreatic Ductal Adenocarcinoma analysis.
 * **Goal:** Understand spatial distribution of metastatic cells in lymphatic tissue.
+
+# Deconvolution

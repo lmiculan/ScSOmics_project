@@ -1,0 +1,192 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r load_packages,warning=F,message=F}
+# LOAD LIBRARIES
+library(tidyverse) 
+library(Seurat) 
+library(patchwork) 
+library(ggplot2)
+library(dplyr)
+```
+
+
+```{r load_data,warning=F,message=F}
+# Load data
+untar("/Users/chiara/Downloads/GSE224411_RAW.tar",
+      exdir = "/Users/chiara/Downloads/GSE224411_RAW")
+#list.files("/Users/chiara/Downloads/GSE224411_RAW")
+```
+
+
+```{r load_data,warning=F,message=F}
+# HCC
+untar("/Users/chiara/Downloads/GSE224411_RAW/GSM7021870_HCC.tar.gz",
+  exdir = "/Users/chiara/Downloads/GSE224411_RAW/GSM7021870_HCC")
+#list.files("/Users/chiara/Downloads/GSE224411_RAW/GSM7021870_HCC")
+```
+```{r}
+set.seed(123)
+hcc_data <- Load10X_Spatial(data.dir = "./HCC")
+
+
+# VISUALIZATION 
+p0 <- SpatialFeaturePlot(hcc_data, 
+                         features = c("nFeature_Spatial", "nCount_Spatial"),
+                         image.alpha = .5) + 
+   theme(legend.position = "right")
+p0
+
+
+## PUBLISHED DATA
+
+original_labels <- read.delim("HCC/analysis/clustering/graphclust/clusters.csv", sep = ",")
+original_labels <- original_labels %>%
+  select(Barcode, Cluster) %>%
+  rename(orig.ident = Barcode, original_cluster = Cluster)
+hcc_data <- AddMetaData(hcc_data, metadata = original_labels)
+
+# MT
+hcc_data[["percent.mt"]] <- PercentageFeatureSet(
+  hcc_data,
+  pattern = "^MT-")
+
+p1<- VlnPlot(
+  hcc_data,
+  features = c("nFeature_Spatial", "nCount_Spatial","percent.mt"),
+  ncol = 3,
+  pt.size = 0.1) + NoLegend()
+p1
+
+#FILTERING
+hcc_data <- subset(hcc_data, 
+                   subset = nFeature_Spatial > 100 &
+                     nFeature_Spatial < 5000 &
+                     percent.mt < 7)
+
+SpatialFeaturePlot(hcc_data, 
+                         features = c("nFeature_Spatial", "nCount_Spatial"),
+                         image.alpha = .5) + 
+   theme(legend.position = "right")
+
+## NORMALIZATION
+hcc_data <- SCTransform(hcc_data, assay = "Spatial", verbose = FALSE)
+hcc_data
+
+## REDUCTION AND CLUSTERING
+
+hcc_data <- RunPCA(hcc_data, assay = "SCT", verbose = FALSE)
+p3<- DimPlot(hcc_data, reduction = "pca", label = TRUE)
+#p3
+p4<- ElbowPlot(hcc_data)
+p4
+
+hcc_data <- FindNeighbors(hcc_data, reduction = "pca", dims = 1:25)
+
+#for (res in c(0.1, 0.2, 0.4, 0.6)) {
+#  hcc_data <- FindClusters(hcc_data, resolution = res)
+#  print(DimPlot(hcc_data, label = TRUE) + ggtitle(paste("Resolution", res)))
+#}
+
+hcc_data <- FindClusters(hcc_data, verbose = FALSE, resolution=0.6)
+
+hcc_data <- RunUMAP(hcc_data, reduction = "pca", dims = 1:25)
+p5<- DimPlot(hcc_data, reduction = "umap", label = TRUE, pt.size = 1)+ theme_classic()
+p5
+
+p6 <- SpatialDimPlot(hcc_data, 
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5) +
+      theme(legend.position = "none")
+p6
+
+#highlight of some clusters
+p7 <- SpatialDimPlot(hcc_data, 
+                     cells.highlight = CellsByIdentities(
+                       object = hcc_data, idents = c(0,1,3,4)), 
+                     facet.highlight = TRUE, 
+                     ncol = 2,
+                     cols.highlight = c("forestgreen","firebrick"),
+                     pt.size.factor = 2)
+p7
+
+
+
+SpatialDimPlot(hcc_data, group.by = "seurat_clusters")
+SpatialDimPlot(hcc_data, group.by = "original_cluster")
+SpatialDimPlot(hcc_data, 
+               group.by = "seurat_clusters",
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5) +
+      theme(legend.position = "right")
+SpatialDimPlot(hcc_data,
+               group.by = "original_cluster",
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5) +
+      theme(legend.position = "right")
+
+
+## COMPARE CLUSTERS
+de_markers <- FindMarkers(hcc_data, ident.1 = 1, ident.2 = 0)
+de_markers <- de_markers|>arrange(desc(avg_log2FC))
+de_markers %>%
+  slice_max(order_by = avg_log2FC, n = 7)
+
+
+# FIND ALL MARKERS
+all_markers_hcc <- FindAllMarkers(
+  hcc_data,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25)
+
+top10_hcc <- all_markers_hcc %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 7)
+head(top10_hcc)
+
+
+p8<- DoHeatmap(
+  hcc_data,
+  features = top10_hcc$gene)
+p8 
+
+
+#ANNOTATION
+new.ids <- c(
+  "malignant cells",
+  "macrophages", 
+  "B cells", 
+  "cholangiocytes",
+  "fibroblast",
+  "hematopoietic multipotent progenitor cell",
+  "macrophages",
+  "hematopoietic multipotent progenitor cell")
+
+names(new.ids) <- levels(hcc_data)
+
+hcc_data <- RenameIdents(hcc_data, new.ids)
+
+hcc_data$annotation <- Idents(hcc_data)
+
+DimPlot(
+  hcc_data,
+  reduction = "umap",
+  label = TRUE
+)
+
+SpatialDimPlot(
+  hcc_data,
+  group.by = "annotation",
+  label = FALSE
+)
+
+saveRDS(hcc_data, file = "hcc_data.rds")
+```
+
+

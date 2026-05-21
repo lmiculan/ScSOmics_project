@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r load_packages,warning=F,message=F}
+# LOAD LIBRARIES
+library(tidyverse) 
+library(Seurat) 
+library(patchwork) 
+library(ggplot2)
+library(dplyr)
+```
+
+
+```{r load_data,warning=F,message=F}
+# Load data
+untar("/Users/chiara/Downloads/GSE224411_RAW.tar",
+      exdir = "/Users/chiara/Downloads/GSE224411_RAW")
+#list.files("/Users/chiara/Downloads/GSE224411_RAW")
+```
+
+
+```{r}
+# PDAC
+untar("/Users/chiara/Downloads/GSE224411_RAW/GSM7021872_PDAClymphnode.tar.gz",
+  exdir = "/Users/chiara/Downloads/GSE224411_RAW/GSM7021872_PDAClymphnode")
+list.files("/Users/chiara/Downloads/GSE224411_RAW/GSM7021872_PDAClymphnode")
+```
+```{r}
+set.seed(123)
+PDAC_data <- Load10X_Spatial(data.dir = "PDAClymphnode")
+
+
+## PUBLISHED DATA
+
+original_labels <- read.delim("PDAClymphnode/analysis/clustering/graphclust/clusters.csv", sep = ",")
+# Rename the 'Barcode' column to 'orig.ident' to match Seurat's expected metadata format
+colnames(original_labels) <- c("orig.ident", "original_cluster")
+
+PDAC_data <- AddMetaData(PDAC_data, metadata = original_labels)
+
+# MT
+PDAC_data[["percent.mt"]] <- PercentageFeatureSet(
+  PDAC_data,
+  pattern = "^MT-|^mt-")
+
+# VISUALIZATION 
+p0 <- SpatialFeaturePlot(PDAC_data, 
+                         features = c("nFeature_Spatial", "nCount_Spatial"),
+                         image.alpha = .5,
+                         pt.size.factor = 4) + 
+   theme(legend.position = "right")
+p0
+
+
+p2<- VlnPlot(
+  PDAC_data,
+  features = c("nFeature_Spatial", "nCount_Spatial","percent.mt"),
+  ncol = 3,
+  pt.size = 0.1) + NoLegend()
+p2
+
+SpatialFeaturePlot(PDAC_data, 
+                         features = c("nFeature_Spatial", "nCount_Spatial"),
+                         image.alpha = .5,
+                         pt.size.factor = 3) + 
+   theme(legend.position = "right")
+
+#FILTERING
+PDAC_data <- subset(PDAC_data, 
+                   subset = nFeature_Spatial > 100
+                   & nFeature_Spatial < 4000
+                   & percent.mt < 6)
+
+SpatialFeaturePlot(PDAC_data, 
+                         features = c("nFeature_Spatial", "nCount_Spatial"),
+                         image.alpha = .5,
+                         pt.size.factor = 4) + 
+   theme(legend.position = "right") # losing some regions
+
+## NORMALIZATION
+PDAC_data <- SCTransform(PDAC_data, assay = "Spatial", verbose = FALSE)
+PDAC_data
+
+## REDUCTION AND CLUSTERING
+
+PDAC_data <- RunPCA(PDAC_data, assay = "SCT", verbose = FALSE)
+p3<- DimPlot(PDAC_data, reduction = "pca", label = TRUE)
+p3
+p4<- ElbowPlot(PDAC_data)
+p4
+
+PDAC_data <- FindNeighbors(PDAC_data, reduction = "pca", dims = 1:20)
+
+#for (res in c(0.1, 0.2, 0.4, 0.6)) {
+#  PDAC_data <- FindClusters(PDAC_data, resolution = res)
+#  print(DimPlot(PDAC_data, label = TRUE) + ggtitle(paste("Resolution", res)))}
+
+PDAC_data <- FindClusters(PDAC_data, verbose = FALSE, resolution=0.6)
+
+PDAC_data <- RunUMAP(PDAC_data, reduction = "pca", dims = 1:20)
+p5<- DimPlot(PDAC_data, reduction = "umap", label = TRUE, pt.size = 1)
+p5
+
+p6 <- SpatialDimPlot(PDAC_data, 
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5,
+                     pt.size.factor = 4)
+p6
+
+SpatialDimPlot(PDAC_data, group.by = "seurat_clusters",pt.size.factor = 3)
+SpatialDimPlot(PDAC_data, group.by = "original_cluster",pt.size.factor = 3)
+SpatialDimPlot(PDAC_data, 
+               group.by = "seurat_clusters",
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5,
+               pt.size.factor = 4) +
+      theme(legend.position = "right")
+SpatialDimPlot(PDAC_data,
+               group.by = "original_cluster",
+                     label = TRUE, 
+                     label.size = 3, 
+                     image.alpha = .5,
+               pt.size.factor = 4) +
+      theme(legend.position = "right")
+
+#highlight of some clusters
+p7 <- SpatialDimPlot(PDAC_data, 
+                     cells.highlight = CellsByIdentities(
+                       object = PDAC_data, idents = c(1, 2)), 
+                     facet.highlight = TRUE, 
+                     ncol = 2,
+                     cols.highlight = c("forestgreen","firebrick"),
+                     pt.size.factor = 4)
+p7
+
+
+
+## COMPARE CLUSTERS
+de_markers <- FindMarkers(PDAC_data, ident.1 = 0, ident.2 = 1)
+de_markers <- de_markers|>arrange(desc(avg_log2FC))
+de_markers %>%
+  slice_max(order_by = avg_log2FC, n = 7)
+
+# FIND ALL MARKERS
+all_markers_PDAC <- FindAllMarkers(
+  PDAC_data,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25)
+
+top10_PDAC <- all_markers_PDAC %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 7)
+head(top10_PDAC)
+
+p8<- DoHeatmap(
+  PDAC_data,
+  features = top10_PDAC$gene)
+p8 
+
+#ANNOTATION
+new.ids <- c(
+  "myeloid cells",
+  "lymphoid cells",
+  "pancreatic stellate cells/fibroblasts",
+  "pancreatic ductal cells")
+
+names(new.ids) <- levels(PDAC_data)
+
+PDAC_data <- RenameIdents(PDAC_data, new.ids)
+
+PDAC_data$annotation <- Idents(PDAC_data)
+
+DimPlot(
+  PDAC_data,
+  reduction = "umap",
+  label = TRUE
+)
+
+SpatialDimPlot(
+  PDAC_data,
+  group.by = "annotation",
+  label = FALSE,
+  pt.size.factor = 4
+)
+
+saveRDS(PDAC_data, file = "PDAC_data.rds")
+```
+
+

@@ -48,16 +48,16 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-# Files bigger than 50MB
-/GSM7021870_HCC.tar.gz
-/GSM7021871_PanIN.tar.gz
-/GSM7021872_PDAClymphnode.tar.gz
-/HCC/molecule_info.h5
-/PanIN/cloupe.cloupe
-/PanIN/molecule_info.h5
-
 # Hidden files with ._
 ._*
 
 # OSX shart
 .DS_Store
+annots/HCC_annot/GSE151530_matrix.mtx.gz
+annots/PDAC_annot/Exp_data_UMIcounts.mtx
+HCC/molecule_info.h5
+hcc_data.rds
+PanIN/cloupe.cloupe
+PanIN/molecule_info.h5
+PanIN_data.rds
+PDAC_data.rds

@@ -1,256 +1,252 @@
 # Single Cell Spatial Omics Analysis for GSM7021871
-# Load necessary libraries
 library(Seurat)
 library(tidyverse)
 library(ggplot2)
+library(Matrix)
+library(data.table)
 library(patchwork)
-library(SoupX)
-library(scDblFinder)
 library(SeuratWrappers)
 library(monocle3)
-library(dplyr)
+library(harmony)
 
-##### Functions #####
-# Quality control pipeline for Seurat objects
-qc_pipeline <- function(seurat_obj, dimensions, res) {
-  seurat_obj <- SCTransform(seurat_obj) |>
-  RunPCA() |>
+# qc_pipeline(): QC/normalization + clustering + UMAP for a Seurat object.
+# parameters: dimensions controls PCA/UMAP depth; res controls cluster granularity;
+# assay_type selects the input assay for SCTransform; pcadim sets number of PCs computed.
+qc_pipeline <- function(seurat_obj, dimensions = 20, res = 0.5, assay_type = "Spatial", pcadim = 50) {
+  seurat_obj <- SCTransform(seurat_obj, assay = assay_type) |>
+  RunPCA(assay = "SCT", npcs = pcadim) |>
   FindNeighbors(dims = 1:dimensions) |>
   FindClusters(resolution = res) |>
   RunUMAP(dims = 1:dimensions)
 }
 
-# SoupX function on multi sample Seurat
-run_soupx_automated <- function(seurat_obj, raw_mtx, filtered_mtx) {
-  print(paste("Running SoupX on", seurat_obj@project.name))
-  
-  # 1. Access Gene Names specifically from the Dimnames list
-  raw_genes <- raw_mtx@Dimnames[[1]]
-  filt_genes <- filtered_mtx@Dimnames[[1]]
-  
-  print(paste("Raw matrix gene dimensions:", length(raw_genes)))
-  print(paste("Filtered matrix gene dimensions:", length(filt_genes)))
-  
-  # 2. Intersect ONLY the gene names
-  common_genes <- intersect(raw_genes, filt_genes)
-  
-  if(length(common_genes) == 0) {
-     stop("Zero common genes found. Check if one matrix uses Ensembl IDs and the other Symbols.")
-  }
-
-  # 3. Subset matrices using the character vector of gene names
-  raw_aligned <- raw_mtx[common_genes, ]
-  filt_aligned <- filtered_mtx[common_genes, ]
-
-  # 4. Create SoupChannel
-  sc <- SoupChannel(raw_aligned, filt_aligned)
-  
-  # 5. Handle Barcode Mismatches
-  clusters <- Idents(seurat_obj)
-  names(clusters) <- gsub("-1_.*", "-1", names(clusters))
-  
-  # Ensure barcodes match the aligned filtered matrix
-  # filt_aligned@Dimnames[[2]] contains the barcodes
-  common_barcodes <- intersect(names(clusters), colnames(filt_aligned))
-  clusters <- clusters[common_barcodes]
-  
-  # 6. Run SoupX Pipeline
-  sc <- setClusters(sc, clusters)
-  sc <- autoEstCont(sc, doPlot = FALSE, forceAccept=TRUE)
-  out <- adjustCounts(sc)
-  
-  # 7. Create cleaned Seurat Object
-  # Subsetting the original metadata to match surviving barcodes
-  cleaned_meta <- seurat_obj@meta.data[common_barcodes, ]
-  cleaned_seurat <- CreateSeuratObject(counts = out, 
-                                       meta.data = cleaned_meta, 
-                                       project = seurat_obj@project.name)
-
-  # Clean up memory immediately
-  rm(raw_mtx, filtered_mtx, raw_aligned, filt_aligned, out); gc()
-
-  return(cleaned_seurat)
-}
-
-# Multiple sample doublet detection using scDblFinder
-dblfinder <- function(seurat_obj) {
-  counts_mat <- LayerData(seurat_obj[["RNA"]], layer = "counts")
-
-  sce <- SingleCellExperiment(
-    assays = list(counts = counts_mat),
-    colData = seurat_obj@meta.data
-  )
-
-  sce <- scDblFinder(sce, samples = "orig.ident")
-
-  seurat_obj$scDblFinder.score <- sce$scDblFinder.score
-  seurat_obj$scDblFinder.class <- sce$scDblFinder.class
-  seurat_obj
-}
-
-
-##### GSM7021871 Data Analysis #####
-
-# Directory for results
 if (!dir.exists("results")) dir.create("results", recursive = TRUE)
 
-###### Data Analysis ######
+set.seed(123)
 
-filtered_data_dirs <- list("./HCC/filtered_feature_bc_matrix.h5", "./PanIN/filtered_feature_bc_matrix.h5", "./PDAClymphnode/filtered_feature_bc_matrix.h5")
-raw_data_dirs <- list("./HCC/raw_feature_bc_matrix.h5", "./PanIN/raw_feature_bc_matrix.h5", "./PDAClymphnode/raw_feature_bc_matrix.h5")
+hcc_data <- LoadSeuratRds("hcc_data.rds")
+panin_data <- LoadSeuratRds("PanIN_data.rds")
+pdac_data <- LoadSeuratRds("PDAC_data.rds")
 
-# Matrices files
-hcc_counts <- Read10X_h5(filtered_data_dirs[[1]])
-raw_hcc_counts <- Read10X_h5(raw_data_dirs[[1]])
+hcc_data$orig.ident <- "HCC"
+panin_data$orig.ident <- "PanIN"
+pdac_data$orig.ident <- "PDAC"
 
-panin <- Read10X_h5(filtered_data_dirs[[2]])
-raw_panin <- Read10X_h5(raw_data_dirs[[2]])
-
-pdac <- Read10X_h5(filtered_data_dirs[[3]])
-raw_pdac <- Read10X_h5(raw_data_dirs[[3]])
-
-filtered_list <- list(hcc_counts, panin, pdac)
-raw_list <- list(raw_hcc_counts, raw_panin, raw_pdac)
-
-# Create a standard Seurat Object
-hcc_seurat <- CreateSeuratObject(counts = hcc_counts, project = "HCC_SingleCell")
-raw_hcc_seurat <- CreateSeuratObject(counts = raw_hcc_counts, project = "HCC_SingleCell_Raw")
-
-panin_seurat <- CreateSeuratObject(counts = panin, project = "PanIN_SingleCell")
-raw_panin_seurat <- CreateSeuratObject(counts = raw_panin, project = "PanIN_SingleCell_Raw")
-
-pdac_seurat <- CreateSeuratObject(counts = pdac, project = "PDAC_SingleCell")
-raw_pdac_seurat <- CreateSeuratObject(counts = raw_pdac, project = "PDAC_SingleCell_Raw")
-
-seu_list <- list(hcc_seurat, panin_seurat, pdac_seurat)
-
-raw_seu_list <- list(raw_hcc_seurat, raw_panin_seurat, raw_pdac_seurat)
-
-# Initial QC for SoupX
-seu_list_qc <- map(seu_list, ~ qc_pipeline(.x, dimensions = 20, res = 0.5))
-
-soupx_list <- pmap(
-  list(seu_list_qc, raw_list, filtered_list),
-  ~ run_soupx_automated(..1, ..2, ..3)
-)
-# Second quality control
-soupx_list <- map(soupx_list, ~ {
-  .x[["percent.mt"]] <- PercentageFeatureSet(.x, pattern = "^MT-")
-  .x[["percent.ribo"]] <- PercentageFeatureSet(.x, pattern = "^RPS|^RPL")
-  return(.x)
-})
-
-# Plot SoupX results for each sample
-lapply(seq_along(soupx_list), function(i) {
-  p <- VlnPlot(soupx_list[[i]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 2) + labs(x = NULL)
-  print(p)
-})
-
-# Subset based on QC metrics
-soupx_list_sub <- map(soupx_list, ~ subset(.x, subset =
-                                            nFeature_RNA > 200 &
-                                            nFeature_RNA < 2500 &
-                                            percent.mt < 5))
-
-# Merging all samples into a single Seurat object for downstream analysis
-merged_seurat <- Reduce(function(x, y) merge(x, y), soupx_list_sub)
+# Merge samples to compare across tissues in a shared embedding.
+seu_list_sub <- list(hcc_data, panin_data, pdac_data)
+merged_seurat <- Reduce(function(x, y) merge(x, y), seu_list_sub)
 merged_seurat <- JoinLayers(
   object = merged_seurat,
-  assay = "RNA",
+  assay = "Spatial",
   layers = "counts",
   new.layer = "counts"
 )
 
-# Delete unused objects to free memory
-rm(list = c("seu_list_qc","hcc_seurat", "panin_seurat", "pdac_seurat", "raw_panin_seurat", "raw_hcc_counts", "raw_pdac_seurat", "raw_panin_seurat", "raw_pdac_counts", "raw_hcc_seurat", "hcc_counts", "panin", "pdac", "raw_hcc_counts", "raw_panin", "raw_pdac", "filtered_list", "raw_list", "soupx_list_sub", "soupx_list", "seu_list", "raw_seu_list", "run_soupx_automated", "seu_list", "raw_seu_list", "filtered_data_dirs"))
+# Set orig.ident and colours for consistent plotting across merged and individual analyses.
+merged_seurat$orig.ident <- merged_seurat$orig.ident
 
-##### Doublet Detection using scDblFinder #####
-merged_seurat <- dblfinder(merged_seurat)
+unified_palette <- c(
+  "HCC"   = "#E66101",
+  "PanIN" = "#B2ABD2",
+  "PDAC"  = "#5E3C99"
+)
 
-# Subsetting to keep only singlets
-merged_seurat <- subset(merged_seurat, subset = scDblFinder.class == "singlet")
+gc()
+merged_seurat <- qc_pipeline(merged_seurat, dimensions = 20, res = 0.5)
+DimPlot(merged_seurat, reduction = "umap", label = T, group.by = "orig.ident", cols = unified_palette, pt.size = 3) + ggtitle("UMAP of Merged Samples Colored by Sample")
+ggsave(filename = "results/Merged_UMAP.png", width = 12, height = 11)
+gc()
 
-# Final clustering and visualization
-final_seurat <- qc_pipeline(merged_seurat, dimensions = 20, res = 0.5)
-ElbowPlot(final_seurat, ndims = 50) + ggtitle("Elbow Plot for PCA - Final Seurat Object")
+# Focus on the pancreatic disease axis by restricting to PanIN and PDAC.
+pancreatic_axis <- subset(merged_seurat, subset = orig.ident %in% c("PanIN", "PDAC"))
+rm(merged_seurat)
 
-# Dimplots for visualiztion
-DimPlot(final_seurat, reduction = "umap", group.by = "orig.ident",label = TRUE) + ggtitle("UMAP of Final Data After QC and Doublet Removal - Samples")
+# Deconvolution: use a pancreas atlas reference to transfer cell-type labels into spatial queries.
 
-##### Single sample QC pipeline and UMAP visualization #####
-seu_list <- SplitObject(final_seurat, split.by = "orig.ident")
-# Merge PanIn and PDAC samples for a combined pancreatic analysis
-seu_list[["Pancreatic_Axis"]] <- merge(seu_list[["PanIN_SingleCell"]], seu_list[["PDAC_SingleCell"]])
-seu_list <- seu_list[c("HCC_SingleCell", "Pancreatic_Axis")]
+sparse_counts <- readMM("annots/PDAC_annot/Exp_data_UMIcounts.mtx")
+metadata <- fread("annots/PDAC_annot/Cells.csv", data.table = FALSE)
+features <- fread("annots/PDAC_annot/Genes.txt", data.table = FALSE, header = FALSE)$V1
+barcodes <- metadata$cell_name
+cell_type <- metadata$cell_type
 
-# Rerun QC
-seu_qc <- map(seu_list, ~ qc_pipeline(.x, dimensions = 20, res = 0.5))
-# Dimplots for each sample
-lapply(seq_along(seu_qc), function(i) {
-  p <- DimPlot(seu_qc[[i]], reduction = "umap", label = TRUE) + ggtitle(paste("UMAP of", names(seu_qc)[i]))
-  print(p)
-})
+rownames(sparse_counts) <- features
+colnames(sparse_counts) <- barcodes
 
-##### Differentially expressed analysis #####
-# DE-analysis per sample
-lapply(seq_along(seu_qc), function(i) {
-  seu_qc[[i]] <- PrepSCTFindMarkers(seu_qc[[i]])
-  markers <- FindAllMarkers(seu_qc[[i]], assay = DefaultAssay(seu_qc[[i]]), slot = "data", test.use = "wilcox", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
-  markers <- markers %>% arrange(cluster, desc(avg_log2FC))
-  write.csv(markers, file = file.path("results", paste0("markers_", names(seu_qc)[i], ".csv")), row.names = FALSE)
-})
+gc()
 
-# Heatmaps of top markers per sample
-lapply(seq_along(seu_qc), function(i) {
-  markers <- read.csv(file.path("results", paste0("markers_", names(seu_qc)[i], ".csv")))
-  top4 <- markers %>% group_by(cluster) %>% filter(p_val_adj < 0.05) %>% slice_max(order_by = avg_log2FC, n = 4) %>% ungroup()
-  top_genes <- unique(top4$gene)
-  heatmap_plot <- DoHeatmap(seu_qc[[i]], features = top_genes, assay = DefaultAssay(seu_qc[[i]]), slot = "scale.data") +
-    NoLegend() +
-    ggtitle(paste("Top 4 markers per cluster for", names(seu_qc)[i]))
-  print(heatmap_plot)
-  # Feature plots for top markers, per cluster
-  p <- FeaturePlot(seu_qc[[i]], features = top_genes, reduction = "umap") +
-    ggtitle(paste("Feature Plot of Cell Cycle Genes for", names(seu_qc)[i]))
-  print(p)
-})
+pancreas_atlas <- CreateSeuratObject(counts = sparse_counts, meta.data = metadata, assay = "RNA")
+rm(sparse_counts)
 
+Idents(pancreas_atlas) <- metadata$cell_type
 
+# Downsample to 100 cells to reduce compute while validating the pipeline.
+set.seed(123)
+pancreas_sub <- subset(pancreas_atlas, downsample = 100)
 
-## Trajectory analysis with pseudotime ordering ##
+# SCTransform on the reference so anchors use SCT-normalized features.
+pancreas_sub <- SCTransform(pancreas_sub, assay = "RNA", verbose = FALSE)
 
-# 7. Order cells in pseudotime (root cells can be specified if known, otherwise Monocle3 will attempt to infer them)
-cds_pancreatic <- order_cells(cds_pancreatic)
-plot_cells(cds_pancreatic, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
-  ggtitle("Monocle3 Trajectory Analysis with Cluster Coloring")
-plot_cells(cds_pancreatic, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
-  ggtitle("Monocle3 Trajectory Analysis with Pseudotime Coloring")
+empty_ct <- pancreas_sub$cell_type == "" | is.na(pancreas_sub$cell_type)
 
-####### HCC Trajectory Analysis #######
-# 1. Isolate only the HCC cells
-hcc_only <- subset(final_seurat, subset = orig.ident %in% "HCC_SingleCell")
+sum(empty_ct)
 
-# 2. Extract the matrix and metadata
-expression_matrix <- hcc_only[["SCT"]]@counts
-cell_metadata <- hcc_only@meta.data
+pancreas_sub <- subset(pancreas_sub, cells = colnames(pancreas_sub)[!empty_ct])
+
+DefaultAssay(pdac_data) <- "SCT"
+
+# Use SCT normalization with pcaproject for stable transfer; dims=1:50 to capture broad variance.
+anchors <- FindTransferAnchors(
+  reference = pancreas_sub,
+  query = pdac_data,
+  normalization.method = "SCT",
+  reference.assay = "SCT",
+  query.assay = "SCT",
+  reduction = "pcaproject",
+  dims = 1:50
+)
+
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata = pancreas_sub$cell_type,
+  prediction.assay = TRUE,
+  weight.reduction = pdac_data[["pca"]],
+  dims = 1:50
+)
+
+pdac_data[["predictions"]] <- predictions
+DefaultAssay(pdac_data) <- "predictions"
+
+print(GetAssayData(pdac_data, assay = "predictions", layer = "data")[1:5, 1:5])
+
+cell_types <- unique(rownames(pdac_data[["predictions"]]))
+for (ct in cell_types) {
+  p <- FeaturePlot(pdac_data, features = ct, pt.size = 3) +
+    ggtitle(paste("Spatial Distribution of Predicted", ct, "in PDAC Sample"))
+  ggsave(filename = paste0("results/PDAC_deconv/PDAC_Predicted_", ct, ".png"), plot = p, width = 12, height =11)
+}
+
+DefaultAssay(panin_data) <- "SCT"
+
+anchors_pan <- FindTransferAnchors(
+  reference = pancreas_sub,
+  query = panin_data,
+  normalization.method = "SCT",
+  reference.assay = "SCT",
+  query.assay = "SCT",
+  reduction = "pcaproject",
+  dims = 1:50
+)
+
+predictions_pan <- TransferData(
+  anchorset = anchors_pan,
+  refdata = pancreas_sub$cell_type,
+  prediction.assay = TRUE,
+  weight.reduction = panin_data[["pca"]],
+  dims = 1:50
+)
+
+panin_data[["predictions"]] <- predictions_pan
+DefaultAssay(panin_data) <- "predictions"
+
+cell_types_pan <- unique(rownames(panin_data[["predictions"]]))
+for (ct in cell_types_pan) {
+  p <- FeaturePlot(panin_data, features = ct, pt.size = 3) +
+    ggtitle(paste("Spatial Distribution of Predicted", ct, "in PanIN Sample"))
+  ggsave(filename = paste0("results/PanIN_deconv/PanIN_Predicted_", ct, ".png"), plot = p, width = 12, height =11)
+}
+
+sparse_counts <- readMM("annots/HCC_annot/GSE151530_matrix.mtx.gz")
+features <- fread("annots/HCC_annot/GSE151530_genes.tsv.gz", data.table = FALSE, header = FALSE)$V2
+barcodes <- fread("annots/HCC_annot/GSE151530_barcodes.tsv.gz", data.table = FALSE, header = FALSE)$V1
+cell_types <- fread("annots/HCC_annot/GSE151530_Info.txt", data.table = FALSE, header = T)
+
+# Remove version suffixes to align gene symbols between atlas and spatial data.
+features <- gsub("\\.\\d+$", "", features)
+
+rownames(sparse_counts) <- features
+colnames(sparse_counts) <- barcodes
+
+# Making rownames unique to avoid issues in CreateSeuratObject
+dup <- duplicated(rownames(sparse_counts))
+rownames(sparse_counts) <- make.unique(rownames(sparse_counts))
+
+gc()
+hcc_atlas <- CreateSeuratObject(counts = sparse_counts, assay = "RNA")
+rm(sparse_counts)
+gc()
+
+Idents(hcc_atlas) <- cell_types$Type
+
+set.seed(123)
+hcc_sub <- subset(hcc_atlas, downsample = 100)
+
+hcc_sub <- SCTransform(hcc_sub, assay = "RNA", verbose = FALSE)
+
+# Ensure all cells have a valid cell type for transfer; remove any with empty or NA labels.
+empty_ct <- hcc_sub@active.ident == "" | is.na(hcc_sub@active.ident)
+
+sum(empty_ct)
+
+hcc_sub <- subset(hcc_sub, cells = colnames(hcc_sub)[!empty_ct])
+
+DefaultAssay(hcc_data) <- "SCT"
+
+# Use VariableFeatures(hcc_sub) and dims=1:30 to reduce noise for the HCC atlas.
+anchors <- FindTransferAnchors(
+  reference = hcc_sub,
+  query = hcc_data,
+  features = VariableFeatures(hcc_sub),
+  normalization.method = "SCT",
+  reference.assay = "SCT",
+  query.assay = "SCT",
+  reduction = "pcaproject",
+  dims = 1:30
+)
+
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata = hcc_sub@active.ident,
+  prediction.assay = TRUE,
+  weight.reduction = hcc_data[["pca"]],
+  dims = 1:30
+)
+
+hcc_data[["predictions"]] <- predictions
+DefaultAssay(hcc_data) <- "predictions"
+
+print(GetAssayData(hcc_data, assay = "predictions", layer = "data")[1:5, 1:5])
+
+cell_types <- unique(rownames(hcc_data[["predictions"]]))
+for (ct in cell_types) {
+  p <- FeaturePlot(hcc_data, features = ct, pt.size = 3) +
+    ggtitle(paste("Spatial Distribution of Predicted", ct, "in HCC Sample"))
+  ggsave(filename = paste0("results/HCC_deconv/HCC_Predicted_", ct, ".png"), plot = p, width = 12, height =11)
+}
+
+# Rerun QC with moderate clustering (res=0.6) for subtype separation.
+pancreatic_axis <- qc_pipeline(pancreatic_axis, dimensions = 20, res = 0.6)
+DimPlot(pancreatic_axis, reduction = "umap", label = TRUE, group.by = "orig.ident", cols = unified_palette, pt.size = 3) + ggtitle("UMAP of PanIN and PDAC Samples")
+ggsave(filename = "results/PanIN_PDAC_UMAP.png", width = 12, height = 11)
+
+# Trajectory analysis: reuse Seurat UMAP to order cells in monocle3.
+expression_matrix <- hcc_data[["SCT"]]@counts
+cell_metadata <- hcc_data@meta.data
 
 feature_metadata <- data.frame(
   gene_short_name = rownames(expression_matrix),
   row.names = rownames(expression_matrix)
 )
 
-# 3. Build the Monocle3 object
 cds_hcc <- new_cell_data_set(
   expression_matrix,
   cell_metadata = cell_metadata,
   gene_metadata = feature_metadata
 )
 
-# 4. Inject the existing HCC UMAP coordinates
-reducedDims(cds_hcc)$UMAP <- Embeddings(hcc_only, reduction = "umap")
+reducedDims(cds_hcc)$UMAP <- Embeddings(hcc_data, reduction = "umap")
 
-# 5. Assign a single mock partition to ensure a continuous path
-hcc_clusters <- Idents(hcc_only)
+# Set a single partition to enforce a continuous trajectory.
+hcc_clusters <- Idents(hcc_data)
 names(hcc_clusters) <- colnames(cds_hcc)
 cds_hcc@clusters$UMAP$clusters <- hcc_clusters
 
@@ -258,104 +254,74 @@ mock_partitions <- factor(rep(1, ncol(cds_hcc)), levels = 1)
 names(mock_partitions) <- colnames(cds_hcc)
 cds_hcc@clusters$UMAP$partitions <- mock_partitions
 
-# 6. Learn the specific trajectory graph for HCC
 cds_hcc <- learn_graph(cds_hcc, use_partition = FALSE)
 cds_hcc <- order_cells(cds_hcc, reduction_method = "UMAP")
-plot_cells(cds_hcc, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
+
+plot_cells(cds_hcc, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 5, cell_size = 3) +
   ggtitle("Monocle3 Trajectory Analysis of HCC Only - Clusters")
-plot_cells(cds_hcc, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 1) +
+ggsave(filename = "results/HCC_Trajectory/HCC_Trajectory_Clusters.png", width = 12, height = 11)
+plot_cells(cds_hcc, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 5, cell_size = 3) +
   ggtitle("Monocle3 Trajectory Analysis of HCC Only - Pseudotime")
+ggsave(filename = "results/HCC_Trajectory/HCC_Trajectory_Pseudotime.png", width = 12, height = 11)
 
-##### Archive #####
+expression_matrix_pan <- panin_data[["SCT"]]@counts
+cell_metadata_pan <- panin_data@meta.data
+feature_metadata_pan <- data.frame(
+  gene_short_name = rownames(expression_matrix_pan),
+  row.names = rownames(expression_matrix_pan)
+)
 
-## Ensure SCT is set as the default assay if present
-#DefaultAssay(final_seurat) <- "SCT"
-#
-## Ensure identities are set to Seurat clusters
-#if (is.null(Idents(final_seurat))) Idents(final_seurat) <- final_seurat$seurat_clusters
-#
-## Find markers for all clusters (only positive markers)
-#markers_all <- FindAllMarkers(final_seurat,
-#                              assay = DefaultAssay(final_seurat),
-#                              slot = "data",
-#                              test.use = "wilcox",
-#                              only.pos = TRUE,
-#                              min.pct = 0.25,
-#                              logfc.threshold = 0.25)
-#
-## Order and save marker table
-#markers_all <- markers_all %>% arrange(orig.ident, desc(avg_log2FC))
-#write.csv(markers_all, file = file.path("results", "markers_by_cluster.csv"), row.names = FALSE)
-#saveRDS(markers_all, file = file.path("results", "markers_all_clusters.rds"))
-#
-## Select top 10 markers per cluster and plot heatmap
-#top10 <- markers_all %>% group_by(orig.ident) %>% filter(p_val_adj < 0.05)%>% slice_max(order_by = avg_log2FC, n = 10) %>% ungroup()
-#top_genes <- unique(top10$gene)
-#
-## Draw heatmap of top markers (uses scaled data from SCT if available)
-#heatmap_plot <- DoHeatmap(final_seurat, features = top_genes, assay = DefaultAssay(final_seurat), slot = "scale.data") +
-#  NoLegend() +
-#  ggtitle("Top 10 markers per cluster")
-#print(heatmap_plot)
-#
-### Feature scatter plots of genes ##
-#### Pancreatic axis genes ###
-#pancreatic_axis <- subset(final_seurat, subset = orig.ident %in% c("PanIN_SingleCell", "PDAC_SingleCell"))
-#
-## Rerun qc pipeline on the subset to ensure proper dimensionality reduction and clustering
-#pancreatic_axis <- qc_pipeline(pancreatic_axis, dimensions = 20, res = 0.5)
-#
-#markers_all <- FindAllMarkers(pancreatic_axis,
-#                              assay = DefaultAssay(final_seurat),
-#                              slot = "data",
-#                              test.use = "wilcox",
-#                              only.pos = TRUE,
-#                              min.pct = 0.25,
-#                              logfc.threshold = 0.25)
-#
-#markers_all <- markers_all %>% group_by(cluster) %>% slice_max(order_by = avg_log2FC, n = 5)
-#DoHeatmap(pancreatic_axis, features = markers_all$gene[1:20], assay = DefaultAssay(pancreatic_axis), slot = "scale.data") +
-#  NoLegend() +
-#  ggtitle("Top 20 markers for PanIN and PDAC")
-#feature_plots
-### TBA cluster identification ##
-#
-### Trajectory analysis ##
-## 1. Isolate PanIN and PDAC samples for trajectory analysis
-#
-## 2. Extract the SCT Assay counts from the subset
-#expression_matrix <- pancreatic_axis[["SCT"]]@counts
-#cell_metadata <- pancreatic_axis@meta.data
-#
-#feature_metadata <- data.frame(
-#  gene_short_name = rownames(expression_matrix),
-#  row.names = rownames(expression_matrix)
-#)
-#
-## 3. Create the new Monocle3 object
-#cds_pancreatic <- new_cell_data_set(
-#  expression_matrix,
-#  cell_metadata = cell_metadata,
-#  gene_metadata = feature_metadata
-#)
-#
-## 4. Inject the subsetted UMAP coordinates
-## Seurat automatically subsets the embeddings when you subset the object
-#reducedDims(cds_pancreatic)$UMAP <- Embeddings(pancreatic_axis, reduction = "umap")
-#
-## 5. Synchronize clusters for graph learning
-#pan_clusters <- Idents(pancreatic_axis)
-#names(pan_clusters) <- colnames(cds_pancreatic)
-#cds_pancreatic@clusters$UMAP$clusters <- pan_clusters
-#
-## Mock partition to ensure a single unified graph
-#mock_partitions <- factor(rep(1, ncol(cds_pancreatic)), levels = 1)
-#names(mock_partitions) <- colnames(cds_pancreatic)
-#cds_pancreatic@clusters$UMAP$partitions <- mock_partitions
-#
-## 6. Learn the graph on the pancreatic subset
-#cds_pancreatic <- learn_graph(cds_pancreatic, use_partition = FALSE)
-#
-#plot_cells(cds_pancreatic, color_cells_by = "partition", label_groups_by_cluster = TRUE, graph_label_size = 3) +
-#  ggtitle("Monocle3 Trajectory Analysis of PanIN and PDAC")
-#
+cds_panin <- new_cell_data_set(
+  expression_matrix_pan,
+  cell_metadata = cell_metadata_pan,
+  gene_metadata = feature_metadata_pan
+)
+
+reducedDims(cds_panin)$UMAP <- Embeddings(panin_data, reduction = "umap")
+
+panin_clusters <- Idents(panin_data)
+names(panin_clusters) <- colnames(cds_panin)
+cds_panin@clusters$UMAP$clusters <- panin_clusters
+mock_partitions_pan <- factor(rep(1, ncol(cds_panin)), levels = 1)
+names(mock_partitions_pan) <- colnames(cds_panin)
+cds_panin@clusters$UMAP$partitions <- mock_partitions_pan
+
+cds_panin <- learn_graph(cds_panin, use_partition = FALSE)
+cds_panin <- order_cells(cds_panin, reduction_method = "UMAP")
+plot_cells(cds_panin, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 2) +
+  ggtitle("Monocle3 Trajectory Analysis of PanIN Only - Clusters")
+ggsave(filename = "results/PanIN_Trajectory/PanIN_Trajectory_Clusters.png", width = 12, height = 11)
+plot_cells(cds_panin, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 2) +
+  ggtitle("Monocle3 Trajectory Analysis of PanIN Only - Pseudotime")
+ggsave(filename = "results/PanIN_Trajectory/PanIN_Trajectory_Pseudotime.png", width = 12, height = 11)
+
+expression_matrix_pdac <- pdac_data[["SCT"]]@counts
+cell_metadata_pdac <- pdac_data@meta.data
+feature_metadata_pdac <- data.frame(
+  gene_short_name = rownames(expression_matrix_pdac),
+  row.names = rownames(expression_matrix_pdac)
+)
+
+cds_pdac <- new_cell_data_set(
+  expression_matrix_pdac,
+  cell_metadata = cell_metadata_pdac,
+  gene_metadata = feature_metadata_pdac
+)
+
+reducedDims(cds_pdac)$UMAP <- Embeddings(pdac_data, reduction = "umap")
+
+pdac_clusters <- Idents(pdac_data)
+names(pdac_clusters) <- colnames(cds_pdac)
+cds_pdac@clusters$UMAP$clusters <- pdac_clusters
+mock_partitions_pdac <- factor(rep(1, ncol(cds_pdac)), levels = 1)
+names(mock_partitions_pdac) <- colnames(cds_pdac)
+cds_pdac@clusters$UMAP$partitions <- mock_partitions_pdac
+
+cds_pdac <- learn_graph(cds_pdac, use_partition = FALSE)
+cds_pdac <- order_cells(cds_pdac, reduction_method = "UMAP")
+plot_cells(cds_pdac, color_cells_by = "cluster", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 3) +
+  ggtitle("Monocle3 Trajectory Analysis of PDAC Only - Clusters")
+ggsave(filename = "results/PDAC_Trajectory/PDAC_Trajectory_Clusters.png", width = 12, height = 11)
+plot_cells(cds_pdac, color_cells_by = "pseudotime", label_groups_by_cluster = TRUE, graph_label_size = 3, cell_size = 3) +
+  ggtitle("Monocle3 Trajectory Analysis of PDAC Only - Pseudotime")
+ggsave(filename = "results/PDAC_Trajectory/PDAC_Trajectory_Pseudotime.png", width = 12, height = 11)
